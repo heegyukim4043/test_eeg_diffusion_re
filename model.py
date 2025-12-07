@@ -5,7 +5,15 @@ import torch.nn.functional as F
 
 
 class EEGEncoder(nn.Module):
-    def __init__(self, in_channels: int, hidden_dim: int, num_layers: int = 3):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_dim: int,
+        num_layers: int = 3,
+        transformer_layers: int = 2,
+        transformer_heads: int = 4,
+        dropout: float = 0.1,
+    ):
         super().__init__()
         convs = []
         c = in_channels
@@ -17,13 +25,43 @@ class EEGEncoder(nn.Module):
             convs.append(nn.MaxPool1d(kernel_size=2))
             c = out_c
         self.conv = nn.Sequential(*convs)
+
+        if transformer_layers > 0:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=transformer_heads,
+                dim_feedforward=hidden_dim * 4,
+                dropout=dropout,
+                batch_first=True,
+                activation="gelu",
+            )
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_layers)
+        else:
+            self.transformer = None
+
         self.proj = nn.Linear(hidden_dim, hidden_dim)
+
+    @staticmethod
+    def sinusoidal_positional_encoding(length: int, dim: int, device: torch.device) -> torch.Tensor:
+        position = torch.arange(length, device=device).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, dim, 2, device=device) * (-torch.log(torch.tensor(10000.0, device=device)) / dim))
+        pe = torch.zeros(length, dim, device=device)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        return pe
 
     def forward(self, x):
         # x: (B, C, T)
-        h = self.conv(x)      # (B, hidden_dim, T')
-        h = h.mean(dim=-1)    # (B, hidden_dim)
-        return self.proj(h)   # (B, hidden_dim)
+        h = self.conv(x)                      # (B, hidden_dim, T')
+        h = h.transpose(1, 2)                 # (B, T', hidden_dim)
+
+        if self.transformer is not None:
+            pos = self.sinusoidal_positional_encoding(h.size(1), h.size(2), h.device)
+            h = h + pos.unsqueeze(0)
+            h = self.transformer(h)           # (B, T', hidden_dim)
+
+        h = h.mean(dim=1)                     # (B, hidden_dim)
+        return self.proj(h)                   # (B, hidden_dim)
 
 
 def sinusoidal_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
@@ -240,3 +278,4 @@ class EEGDiffusionModel(nn.Module):
         eps_pred = self.unet(x_noisy, cond)
         loss = F.mse_loss(eps_pred, noise)
         return loss
+
