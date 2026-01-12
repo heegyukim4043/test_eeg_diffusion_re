@@ -1,0 +1,123 @@
+Origin
+
+python train_subject.py --data_root ./preproc_data --subject_id 2 --epochs 200 --batch_size 8 --img_size 64
+python train_subject.py --data_root ./preproc_data --subject_id 3 --epochs 200 --batch_size 8 --img_size 128
+python train_subject.py --data_root ./preproc_data --subject_ids 1,2,3,4,5,6,7,8,9,10 --epochs 300 --batch_size 8 --img_size 512
+
+python train_subject.py --data_root ./preproc_data --subject_id 1 --epochs 100 --batch_size 4 --img_size 128
+python sample_subject_all.py --data_root ./preproc_data --subject_id 1 --split_ratio 0.9 --img_size 128
+python sample_subject_all.py --data_root ./preproc_data --subject_id 2 --split_ratio 0.9 --img_size 64
+
+python sample_subject_all.py --data_root ./preproc_data --subject_id 1 --split_ratio 0.9 --img_size 512
+python sample_subject_all.py --data_root ./preproc_data --subject_id 3 --split_ratio 0.9 --img_size 128
+python sample_subject.py --data_root ./preproc_data --subject_id 1 --batch_size 8 --split_ratio 0.9 --img_size 512
+
+
+---
+Segment
+python train_subject_segments.py --data_root ./preproc_data --subject_id 1 --epochs 300 --batch_size 8 --img_size 512
+
+python train_subject_segments.py --data_root ./preproc_data --subject_id 1 --epochs 5 --batch_size 8
+python sample_subject_segments_all.py --data_root ./preproc_data --subject_id 1 --batch_size 8
+
+
+---
+Explainable
+
+python eeg_shap_explain.py --data_root ./preproc_data --subject_id 1
+
+
+---
+zero shot
+
+python train_subject_zero_shot.py --data_root ./preproc_data --subject_id 1 --held_out_class 9 --epochs 300 --batch_size 8
+python sample_subject_heldout.py --data_root ./preproc_data --subject_id 1 --held_out_class 9
+
+---
+python train_subject_128.py --data_root ./preproc_data --subject_ids 1,2,3 --epochs 200 --batch_size 32
+python train_subject_128.py --data_root ./preproc_data --subject_ids 4 --epochs 200 --batch_size 32
+python sample_subject_128.py --data_root ./preproc_data --subject_id 4 --trial_index 0
+
+
+
+python train_subject_128.py --data_root ./preproc_data --subject_ids 7 --epochs 200 --batch_size 32
+python sample_subject_all_128.py     --data_root ./preproc_data     --subject_id 7     --split_ratio 0.9     --img_size 128
+
+
+----
+python train_multi_subject_128.py     --data_root ./preproc_data     --train_subject_ids 1-10     --epochs 200     --batch_size 64
+python sample_unseen_subject_128.py     --data_root ./preproc_data     --train_subject_ids 1-10     --test_subject_id 11     --img_size 128
+
+___
+python train_multi_subject_128_2.py     --data_root ./preproc_data     --train_subject_ids 1-10     --epochs 200     --batch_size 64     --cfg_scale 1.8     --lambda_x0 0.1
+
+python sample_unseen_subject_128_2.py     --data_root ./preproc_data     --train_subject_ids 1-10     --test_subject_id 11     --cfg_scale 1.5     --ckpt_root ./checkpoints_multi128_2
+
+----
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 7     --epochs 200     --batch_size 16     --img_size 128     --base_channels 64     --ch_mult 1,2,4,8
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 7     --group_id 1     --img_size 128    --sample_steps 200 
+
+_____________________________
+lambda = 0
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 8     --epochs 200     --batch_size 16     --img_size 128     --base_channels 64     --ch_mult 1,2,4,8 
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 8     --group_id 1     --img_size 128    --sample_steps 200 
+
+
+
+lambda = 0.02
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 9     --epochs 200     --batch_size 16     --img_size 128     --base_channels 64     --ch_mult 1,2,4,8 
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 9    --group_id 1     --img_size 128    --sample_steps 200 
+
+
+lambda = 0.05
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 10   --epochs 200     --batch_size 16     --img_size 128     --base_channels 64     --ch_mult 1,2,4,8 
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 10    --group_id 1     --img_size 128    --sample_steps 200 
+
+_____________________________
+lambda = 0.02
+guidance_scale = 3
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 11     --epochs 200     --batch_size 16     --img_size 128     --base_channels 64     --ch_mult 1,2,4,8 
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 11     --group_id 1     --img_size 128    --sample_steps 200 
+
+
+
+guidance_scale = 2.5
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 12     --epochs 200     --batch_size 16     --img_size 128     --base_channels 64     --ch_mult 1,2,4,8 
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 12    --group_id 1     --img_size 128    --sample_steps 200 
+
+
+guidance_scale = 2
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 13   --epochs 200     --batch_size 16     --img_size 128     --base_channels 64     --ch_mult 1,2,4,8 
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 13    --group_id 1     --img_size 128    --sample_steps 200 
+
+
+---------------------------
+lambda = 0.02 
+guidance_scale = 2.5
+
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 14     --epochs 200     --batch_size 16     --img_size 128     --base_channels 128     --ch_mult 1,2,4,8   --n_res_blocks 5  --num_timesteps 500
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 14    --group_id 1     --img_size 128    --sample_steps 200 
+
+---------------------------
+lambda = 0.02 
+guidance_scale = 2.5
+
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 14     --epochs 200     --batch_size 16     --img_size 128     --base_channels 128     --ch_mult 1,2,4,8   --n_res_blocks 5  --num_timesteps 500
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 14    --group_id 1     --img_size 128    --sample_steps 200 
+
+
+------
+lambda = 0.02 
+guidance_scale = 2.5
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 15     --epochs 200     --batch_size 16     --img_size 128     --base_channels 128     --ch_mult 1,2,4,8   --n_res_blocks 7  --num_timesteps 500
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 15    --group_id 1     --img_size 128    --sample_steps 500 
+
+
+
+__
+lambda = 0.00
+guidance_scale = 2.5
+python train_subject_128_group3.py     --data_root ./preproc_data     --subject_ids 16     --epochs 200     --batch_size 16     --img_size 128     --base_channels 128     --ch_mult 1,2,4,8   --n_res_blocks 7  --num_timesteps 275  --lambda_rec 0.00
+python sample_subject_all_group_128.py     --data_root ./preproc_data     --subject_id 15    --group_id 1     --img_size 128    --sample_steps 500 
+
+

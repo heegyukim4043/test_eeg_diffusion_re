@@ -1,4 +1,4 @@
-# train_subject.py
+# train_subject_zero_shot.py
 import argparse
 import os
 from datetime import datetime
@@ -11,25 +11,61 @@ from dataset_subject import EEGImageSubjectDataset
 from model import EEGDiffusionModel
 
 
-def train_one_subject(args, subject_id: int):
+class FilteredLabelDataset(torch.utils.data.Dataset):
+    """
+    base_dataset에서 특정 라벨만 포함(include)하거나 제외(exclude)하는 래퍼.
+    base_dataset.__getitem__ -> (eeg, img, label) 구조를 가정.
+    """
+    def __init__(self, base_dataset, include_labels=None, exclude_labels=None):
+        super().__init__()
+        self.base = base_dataset
+        self.indices = []
+
+        for idx in range(len(base_dataset)):
+            eeg, img, label = base_dataset[idx]
+            lab = int(label)
+
+            if include_labels is not None:
+                if lab in include_labels:
+                    self.indices.append(idx)
+            elif exclude_labels is not None:
+                if lab not in exclude_labels:
+                    self.indices.append(idx)
+            else:
+                self.indices.append(idx)
+
+        print(
+            f"[FilteredLabelDataset] kept {len(self.indices)} / {len(base_dataset)} "
+            f"samples (include={include_labels}, exclude={exclude_labels})"
+        )
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, i):
+        return self.base[self.indices[i]]
+
+
+def train_one_subject_zero_shot(args, subject_id: int):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("=" * 80)
-    print(f"Training subject {subject_id:02d} on device: {device}")
+    print(f"[ZS] Training subject {subject_id:02d} on device: {device}")
     print("=" * 80)
 
     torch.manual_seed(args.seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(args.seed)
 
+    held_out = args.held_out_class
+    print(f"[ZS] Held-out (pseudo-zero-shot) class = {held_out}")
+
     # ------------------------------------------------------------------
     # 1) 전체 trial을 8:1:1 (train:val:test) 로 만들기
-    #    - EEGImageSubjectDataset 내부에서 split_ratio=0.9 기준으로
-    #      (train+val=90%, test=10%) 를 한 번 나누고
-    #    - 그 90%를 random_split으로 다시 8:1 로 나눔
+    #    단, train/val에서는 held_out_class를 완전히 제외
     # ------------------------------------------------------------------
 
-    # (train+val) 90%
-    base_trainval_ds = EEGImageSubjectDataset(
+    # (train+val) 90% (모든 라벨 포함 상태)
+    base_trainval_full = EEGImageSubjectDataset(
         data_root=args.data_root,
         subject_id=subject_id,
         split="train",
@@ -37,8 +73,8 @@ def train_one_subject(args, subject_id: int):
         img_size=args.img_size,
         seed=args.seed,
     )
-    # test 10%
-    base_test_ds = EEGImageSubjectDataset(
+    # test 10% (모든 라벨 포함 상태; 여기서는 정보 출력만)
+    base_test_full = EEGImageSubjectDataset(
         data_root=args.data_root,
         subject_id=subject_id,
         split="test",
@@ -49,11 +85,27 @@ def train_one_subject(args, subject_id: int):
 
     print(
         f"[Subj {subject_id:02d}] total trials ≈ "
-        f"{len(base_trainval_ds) + len(base_test_ds)} "
-        f"(train+val={len(base_trainval_ds)}, test={len(base_test_ds)})"
+        f"{len(base_trainval_full) + len(base_test_full)} "
+        f"(train+val(full)={len(base_trainval_full)}, test(full)={len(base_test_full)})"
     )
 
-    # train+val(=90%) → train:val = 8:1 로 분할
+    # train+val 풀셋에서 held_out_class 제외
+    base_trainval_ds = FilteredLabelDataset(
+        base_trainval_full,
+        include_labels=None,
+        exclude_labels=[held_out],
+    )
+
+    # (선택) test에서도 held_out을 제외한 분포가 궁금하면 아래처럼 볼 수 있지만
+    # 학습에는 사용하지 않음. (held-out class는 test split에서만 사용 예정)
+    _ = FilteredLabelDataset(
+        base_test_full,
+        include_labels=None,
+        exclude_labels=[held_out],
+    )
+
+    # 이제 base_trainval_ds(=90% 중 non-held-out만)를 8:1 로 나누어
+    # 전체 기준으로 대략 0.8(train) : 0.1(val) 비율이 되도록 함
     n_trainval = len(base_trainval_ds)
     n_train = int(n_trainval * (8.0 / 9.0))  # ≈ 전체 0.8
     n_val = n_trainval - n_train             # ≈ 전체 0.1
@@ -68,8 +120,9 @@ def train_one_subject(args, subject_id: int):
     )
 
     print(
-        f"[Subj {subject_id:02d}] final splits → "
-        f"train={len(train_ds)}, val={len(val_ds)}, test={len(base_test_ds)}"
+        f"[Subj {subject_id:02d}] final (non-held-out) splits → "
+        f"train={len(train_ds)}, val={len(val_ds)}, "
+        f"test(full, incl. held-out)={len(base_test_full)}"
     )
 
     # ------------------------------------------------------------------
@@ -118,7 +171,10 @@ def train_one_subject(args, subject_id: int):
     # 4) run 폴더 & checkpoint 스텝 (20% 단위)
     # ------------------------------------------------------------------
     os.makedirs(args.out_dir, exist_ok=True)
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_subj{subject_id:02d}"
+    run_id = (
+        datetime.now().strftime("%Y%m%d_%H%M%S")
+        + f"_subj{subject_id:02d}_noC{held_out}"
+    )
     run_dir = os.path.join(args.out_dir, run_id)
     os.makedirs(run_dir, exist_ok=True)
     print(f"[Subj {subject_id:02d}] Checkpoints & logs will be saved under: {run_dir}")
@@ -155,7 +211,7 @@ def train_one_subject(args, subject_id: int):
         epoch_count = 0
 
         for eeg, img, label in train_loader:
-            eeg = eeg.to(device)                # (B, 32, 512)
+            eeg = eeg.to(device)                # (B, 32, T)
             img = img.to(device)                # (B, 3, H, W)
             img = img * 2.0 - 1.0               # [0,1] -> [-1,1]
 
@@ -178,13 +234,13 @@ def train_one_subject(args, subject_id: int):
             history_losses.append(float(loss.item()))
             history_epochs.append(epoch)
 
-            # epoch 평균용 합산
+            # epoch 평균용
             epoch_loss_sum += float(loss.item()) * b
             epoch_count += b
 
             if step_id % args.log_interval == 0:
                 print(
-                    f"[Subj {subject_id:02d}] "
+                    f"[ZS Subj {subject_id:02d}] "
                     f"Epoch {epoch} Step {step_id}/{total_steps} "
                     f"Train Loss {loss.item():.4f}"
                 )
@@ -200,11 +256,12 @@ def train_one_subject(args, subject_id: int):
                         "optimizer": optimizer.state_dict(),
                         "epoch": epoch,
                         "step": step_id,
+                        "held_out_class": held_out,
                     },
                     ckpt_path,
                 )
                 print(
-                    f"[Subj {subject_id:02d}] Saved checkpoint "
+                    f"[ZS Subj {subject_id:02d}] Saved checkpoint "
                     f"(progress {step_id}/{total_steps}) to {ckpt_path}"
                 )
 
@@ -215,7 +272,7 @@ def train_one_subject(args, subject_id: int):
         train_epoch_ids.append(epoch)
         train_epoch_losses.append(avg_train_loss)
         print(
-            f"[Subj {subject_id:02d}] Epoch {epoch} "
+            f"[ZS Subj {subject_id:02d}] Epoch {epoch} "
             f"Train Avg Loss {avg_train_loss:.4f}"
         )
 
@@ -243,7 +300,7 @@ def train_one_subject(args, subject_id: int):
         val_history_epochs.append(epoch)
         val_history_losses.append(avg_val_loss)
         print(
-            f"[Subj {subject_id:02d}] Epoch {epoch} "
+            f"[ZS Subj {subject_id:02d}] Epoch {epoch} "
             f"Validation Loss {avg_val_loss:.4f}"
         )
 
@@ -262,10 +319,11 @@ def train_one_subject(args, subject_id: int):
             "optimizer": optimizer.state_dict(),
             "epoch": epoch,
             "step": global_step,
+            "held_out_class": held_out,
         },
         final_ckpt,
     )
-    print(f"[Subj {subject_id:02d}] Training finished. Final checkpoint: {final_ckpt}")
+    print(f"[ZS Subj {subject_id:02d}] Training finished. Final checkpoint: {final_ckpt}")
 
     # ------------------------------------------------------------------
     # 7) CSV 저장
@@ -277,7 +335,7 @@ def train_one_subject(args, subject_id: int):
         writer.writerow(["step", "epoch", "loss"])
         for s, e, l in zip(history_steps, history_epochs, history_losses):
             writer.writerow([s, e, l])
-    print(f"[Subj {subject_id:02d}] Saved step-wise train loss to {csv_path}")
+    print(f"[ZS Subj {subject_id:02d}] Saved step-wise train loss to {csv_path}")
 
     # epoch 단위 val loss
     csv_val_path = os.path.join(run_dir, "val_loss.csv")
@@ -286,7 +344,7 @@ def train_one_subject(args, subject_id: int):
         writer.writerow(["epoch", "val_loss"])
         for e, l in zip(val_history_epochs, val_history_losses):
             writer.writerow([e, l])
-    print(f"[Subj {subject_id:02d}] Saved val loss history to {csv_val_path}")
+    print(f"[ZS Subj {subject_id:02d}] Saved val loss history to {csv_val_path}")
 
     # epoch 단위 train loss
     csv_train_epoch = os.path.join(run_dir, "train_loss_epoch.csv")
@@ -295,7 +353,7 @@ def train_one_subject(args, subject_id: int):
         writer.writerow(["epoch", "train_loss"])
         for e, l in zip(train_epoch_ids, train_epoch_losses):
             writer.writerow([e, l])
-    print(f"[Subj {subject_id:02d}] Saved epoch-avg train loss to {csv_train_epoch}")
+    print(f"[ZS Subj {subject_id:02d}] Saved epoch-avg train loss to {csv_train_epoch}")
 
     # ------------------------------------------------------------------
     # 8) 그래프 저장 (train/val 모두 epoch 기준)
@@ -308,29 +366,29 @@ def train_one_subject(args, subject_id: int):
         ax.plot(train_epoch_ids, train_epoch_losses, marker="o", label="train")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Train Loss")
-        ax.set_title(f"Subject {subject_id:02d} Train Loss")
+        ax.set_title(f"ZS Subject {subject_id:02d} Train Loss (no class {held_out})")
         ax.legend()
         fig.tight_layout()
         png_path = os.path.join(run_dir, "train_loss.png")
         fig.savefig(png_path)
         plt.close(fig)
-        print(f"[Subj {subject_id:02d}] Saved train loss plot to {png_path}")
+        print(f"[ZS Subj {subject_id:02d}] Saved train loss plot to {png_path}")
 
         # (b) val loss vs epoch
         fig, ax = plt.subplots()
         ax.plot(val_history_epochs, val_history_losses, marker="o", label="val")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Val Loss")
-        ax.set_title(f"Subject {subject_id:02d} Validation Loss")
+        ax.set_title(f"ZS Subject {subject_id:02d} Validation Loss (no class {held_out})")
         ax.legend()
         fig.tight_layout()
         png_val = os.path.join(run_dir, "val_loss.png")
         fig.savefig(png_val)
         plt.close(fig)
-        print(f"[Subj {subject_id:02d}] Saved val loss plot to {png_val}")
+        print(f"[ZS Subj {subject_id:02d}] Saved val loss plot to {png_val}")
 
     except Exception as e:
-        print(f"[Subj {subject_id:02d}] Could not save loss plots:", e)
+        print(f"[ZS Subj {subject_id:02d}] Could not save loss plots:", e)
 
 
 def get_args():
@@ -349,18 +407,22 @@ def get_args():
              "If set, overrides --subject_id and trains all listed subjects sequentially.",
     )
 
-    p.add_argument("--img_size", type=int, default=512)
+    p.add_argument("--img_size", type=int, default=64)
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--num_workers", type=int, default=4)
-    p.add_argument("--epochs", type=int, default=300)
+    p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--num_timesteps", type=int, default=200)
     p.add_argument("--eeg_hidden_dim", type=int, default=256)
     p.add_argument("--time_dim", type=int, default=256)
     p.add_argument("--base_channels", type=int, default=64)
-    p.add_argument("--out_dir", type=str, default="./checkpoints_subj")
+
+    p.add_argument("--out_dir", type=str, default="./checkpoints_subj_zs")
     p.add_argument("--log_interval", type=int, default=50)
     p.add_argument("--seed", type=int, default=2025)
+
+    # pseudo-zero-shot: 학습에서 제외할 라벨 (1~9)
+    p.add_argument("--held_out_class", type=int, default=9)
     return p.parse_args()
 
 
@@ -378,8 +440,8 @@ if __name__ == "__main__":
             except ValueError:
                 print(f"Warning: cannot parse subject id '{tok}', skipping.")
         subj_list = sorted(set(subj_list))
-        print(f"Training multiple subjects: {subj_list}")
+        print(f"[ZS] Training multiple subjects: {subj_list}")
         for sid in subj_list:
-            train_one_subject(args, sid)
+            train_one_subject_zero_shot(args, sid)
     else:
-        train_one_subject(args, args.subject_id)
+        train_one_subject_zero_shot(args, args.subject_id)
