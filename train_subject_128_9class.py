@@ -339,6 +339,9 @@ def main():
 
     parser.add_argument("--ckpt_root", type=str, default="./checkpoints_subj128_9cls",
                         help="Base directory for saving checkpoints/logs")
+    parser.add_argument("--n_res_blocks", type=int, default=2,
+                        help="UNet 각 stage당 ResBlock 개수")
+    
 
     args = parser.parse_args()
 
@@ -351,3 +354,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
