@@ -9,32 +9,60 @@ from torchvision.utils import save_image
 
 from model_128 import EEGDiffusionModel128
 
+import scipy.io as sio  # <-- MAT 파일용
+
 
 # ---------------------------------------------------------
-# 1. Dataset (9-class, 128x128)
-#    - preproc_data/subjXX.npz 에서 eeg, 이미지, label 로드
+# 1. Dataset (9-class, 128x128) - MAT 지원
+#    preproc_data/subjXX.mat 에서 eeg, img, labels 로드
 # ---------------------------------------------------------
 class EEGImageDataset9Class(Dataset):
     """
-    NPZ 구조 예시 (필요시 키 이름만 맞춰 수정):
-      - 'eeg'   : (N, C, T)
-      - 'images' 또는 'img' : (N, 3, H, W) 또는 (N, H, W, 3)
-      - 'labels' 또는 'y'   : (N,)
+    MAT 구조 예시 (필요시 키 이름만 맞춰 수정):
+      - 'eeg'   또는 'EEG'   : (N, C, T)
+      - 'img'   또는 'images': (N, 3, H, W) 또는 (N, H, W, 3)
+      - 'labels' 또는 'y'    : (N,)
     """
 
     def __init__(self, data_root, subject_id, indices, img_size=128):
         super().__init__()
-        npz_path = os.path.join(data_root, f"subj{subject_id:02d}.mat")
-        if not os.path.exists(npz_path):
-            raise FileNotFoundError(f"NPZ not found: {npz_path}")
+        # 우선 NPZ -> 없으면 MAT 순으로 찾기
+        npz_path = os.path.join(data_root, f"subj{subject_id:02d}.npz")
+        mat_path = os.path.join(data_root, f"subj{subject_id:02d}.mat")
+
+        if os.path.exists(npz_path):
+            self._load_npz(npz_path)
+        elif os.path.exists(mat_path):
+            self._load_mat(mat_path)
+        else:
+            raise FileNotFoundError(
+                f"No subj{subject_id:02d}.npz or subj{subject_id:02d}.mat in {data_root}"
+            )
 
         self.data_root = data_root
         self.subject_id = subject_id
         self.img_size = img_size
 
+        # 인덱스 선택
+        self.indices = np.array(indices, dtype=np.int64)
+
+        # 이미지 채널 차원 정리 (채널 먼저)
+        # (N, H, W, 3) 이면 (N, 3, H, W)로 바꿈
+        if self.img.ndim == 4 and self.img.shape[-1] in (1, 3) and self.img.shape[1] != 3:
+            # (N, H, W, C) -> (N, C, H, W)
+            self.img = np.transpose(self.img, (0, 3, 1, 2))
+
+        if self.img.shape[1] not in (1, 3):
+            raise ValueError(
+                f"Unexpected image shape: {self.img.shape}. "
+                f"Expected (N,3,H,W) or (N,H,W,3)."
+            )
+
+    # ---------- NPZ 로딩 ----------
+    def _load_npz(self, npz_path):
+        print(f"[Dataset] Loading NPZ: {npz_path}")
         npz = np.load(npz_path)
 
-        # ---- 키 이름 유연하게 처리 ----
         if "eeg" in npz:
             eeg = npz["eeg"]
         elif "EEG" in npz:
@@ -56,24 +84,52 @@ class EEGImageDataset9Class(Dataset):
         else:
             raise KeyError(f"'labels' or 'y' key not found in {npz_path}")
 
-        # dtype/shape 정리
-        self.eeg = eeg.astype(np.float32)          # (N, C, T)
-        self.img = img.astype(np.float32)          # (N, 3, H, W) or (N, H, W, 3)
-        self.labels = labels.astype(np.int64)      # (N,)
+        self.eeg = eeg.astype(np.float32)
+        self.img = img.astype(np.float32)
+        self.labels = labels.astype(np.int64).reshape(-1)
 
-        # 인덱스 선택
-        self.indices = np.array(indices, dtype=np.int64)
+    # ---------- MAT 로딩 ----------
+    def _load_mat(self, mat_path):
+        print(f"[Dataset] Loading MAT: {mat_path}")
+        mat = sio.loadmat(mat_path)
 
-        # 이미지 채널 차원 정리 (채널 먼저)
-        # (N, H, W, 3) 이면 (N, 3, H, W)로 바꿈
-        if self.img.ndim == 4 and self.img.shape[-1] in (1, 3) and self.img.shape[1] != 3:
-            # (N, H, W, C) -> (N, C, H, W)
-            self.img = np.transpose(self.img, (0, 3, 1, 2))
+        # MATLAB 기본 메타 키 제거
+        keys = [k for k in mat.keys() if not k.startswith("__")]
+        # print(keys)  # 필요하면 직접 찍어서 구조 확인
 
-        if self.img.shape[1] not in (1, 3):
-            raise ValueError(
-                f"Unexpected image shape: {self.img.shape}. Expected (N,3,H,W) or (N,H,W,3)."
-            )
+        # EEG
+        if "eeg" in mat:
+            eeg = mat["eeg"]
+        elif "EEG" in mat:
+            eeg = mat["EEG"]
+        else:
+            # 첫 번째 후보에서 뽑는 fallback (필요하면 수정)
+            raise KeyError(f"'eeg' or 'EEG' not found in {mat_path}")
+
+        # 이미지
+        if "img" in mat:
+            img = mat["img"]
+        elif "images" in mat:
+            img = mat["images"]
+        elif "IMG" in mat:
+            img = mat["IMG"]
+        else:
+            raise KeyError(f"'img' or 'images' not found in {mat_path}")
+
+        # 라벨
+        if "labels" in mat:
+            labels = mat["labels"]
+        elif "y" in mat:
+            labels = mat["y"]
+        elif "label" in mat:
+            labels = mat["label"]
+        else:
+            raise KeyError(f"'labels'/'label'/'y' not found in {mat_path}")
+
+        # MATLAB array -> numpy float32/int64
+        self.eeg = np.asarray(eeg, dtype=np.float32)
+        self.img = np.asarray(img, dtype=np.float32)
+        self.labels = np.asarray(labels, dtype=np.int64).reshape(-1)
 
     def __len__(self):
         return len(self.indices)
@@ -82,11 +138,10 @@ class EEGImageDataset9Class(Dataset):
         j = self.indices[idx]
 
         eeg = torch.from_numpy(self.eeg[j])    # (C, T)
-        img = torch.from_numpy(self.img[j])    # (3, H, W) in float
+        img = torch.from_numpy(self.img[j])    # (3, H, W)
         label = int(self.labels[j])
 
-        # 여기서는 이미지가 이미 [-1,1]로 저장되었다고 가정
-        # (만약 [0,1] 이나 [0,255] 라면 시각화 시에만 normalize 해도 무방)
+        # 이미지가 이미 [-1,1]로 저장되었다고 가정
         return eeg, img, label
 
 
@@ -117,7 +172,7 @@ def main(args):
     ckpt_dir = find_latest_ckpt_dir(sid, ckpt_root=args.ckpt_root)
     ckpt_path = os.path.join(ckpt_dir, f"subj{sid:02d}_best.pt")
     if not os.path.exists(ckpt_path):
-        # 만약 best.pt 이름이 다르면 (예: subj16_best.pt) 여기서 수정
+        # 혹시 이름이 subj16_best.pt처럼 굳어있으면 여기를 수정
         alt_path = os.path.join(ckpt_dir, "subj16_best.pt")
         if os.path.exists(alt_path):
             ckpt_path = alt_path
@@ -125,7 +180,6 @@ def main(args):
             raise FileNotFoundError(f"No checkpoint file found in {ckpt_dir}")
 
     print(f"[Subj {sid:02d}] Loading checkpoint: {ckpt_path}")
-
     ckpt = torch.load(ckpt_path, map_location=device)
 
     # 2) 하이퍼파라미터: ckpt에 hparams가 있으면 우선 사용
@@ -174,21 +228,42 @@ def main(args):
     model.eval()
 
     # 4) test split 인덱스 계산 (train/val/test = 8:1:1, seed 고정)
+    #    여기서도 NPZ -> 없으면 MAT 순으로 처리
     npz_path = os.path.join(args.data_root, f"subj{sid:02d}.npz")
-    npz = np.load(npz_path)
-    if "labels" in npz:
-        N = npz["labels"].shape[0]
-    elif "y" in npz:
-        N = npz["y"].shape[0]
+    mat_path = os.path.join(args.data_root, f"subj{sid:02d}.mat")
+
+    if os.path.exists(npz_path):
+        npz = np.load(npz_path)
+        if "labels" in npz:
+            labels_arr = npz["labels"]
+        elif "y" in npz:
+            labels_arr = npz["y"]
+        else:
+            raise KeyError(f"'labels' or 'y' not found in {npz_path}")
+    elif os.path.exists(mat_path):
+        mat = sio.loadmat(mat_path)
+        if "labels" in mat:
+            labels_arr = mat["labels"]
+        elif "y" in mat:
+            labels_arr = mat["y"]
+        elif "label" in mat:
+            labels_arr = mat["label"]
+        else:
+            raise KeyError(f"'labels'/'label'/'y' not found in {mat_path}")
     else:
-        raise KeyError(f"'labels' or 'y' not found in {npz_path}")
+        raise FileNotFoundError(
+            f"No subj{sid:02d}.npz or subj{sid:02d}.mat in {args.data_root}"
+        )
+
+    labels_arr = np.asarray(labels_arr).reshape(-1)
+    N = labels_arr.shape[0]
 
     all_idx = np.arange(N)
     rng = np.random.RandomState(args.seed)
     rng.shuffle(all_idx)
 
-    n_train = int(N * args.split_ratio)          # 기본 0.8
-    n_val = int(N * ((1.0 - args.split_ratio) / 2.0))  # 0.1
+    n_train = int(N * args.split_ratio)               # 기본 0.8
+    n_val = int(N * ((1.0 - args.split_ratio) / 2.0)) # 0.1
     n_test = N - n_train - n_val
 
     train_idx = all_idx[:n_train]
@@ -233,7 +308,7 @@ def main(args):
         x_gen = model.sample(
             eeg=eeg,
             labels=labels,
-            num_steps=args.sample_steps,
+            num_steps=args.sample_steps if args.sample_steps > 0 else None,
         )  # (B,3,H,W), [-1,1]
 
         # 시각화를 위해 [0,1] 범위로 변환
@@ -278,7 +353,7 @@ if __name__ == "__main__":
         "--data_root",
         type=str,
         default="./preproc_data",
-        help="Root directory of subjXX.npz",
+        help="Root directory of subjXX.mat / subjXX.npz",
     )
     parser.add_argument(
         "--ckpt_root",
@@ -351,4 +426,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
-
