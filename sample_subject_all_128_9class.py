@@ -1,269 +1,353 @@
-# sample_subject_all_128_9class.py
 import os
+import glob
 import argparse
 import numpy as np
-from datetime import datetime
 
 import torch
-from torch.utils.data import DataLoader
-import torchvision.utils as vutils
+from torch.utils.data import Dataset, DataLoader
+from torchvision.utils import save_image
 
-from dataset_subject import EEGImageDataset
 from model_128 import EEGDiffusionModel128
 
 
-def find_latest_ckpt_dir(ckpt_root: str, subject_id: int, img_size: int = 128) -> str:
+# ---------------------------------------------------------
+# 1. Dataset (9-class, 128x128)
+#    - preproc_data/subjXX.npz 에서 eeg, 이미지, label 로드
+# ---------------------------------------------------------
+class EEGImageDataset9Class(Dataset):
     """
-    ckpt_root 아래에서 해당 subject_id와 img_size를 포함하는
-    가장 최근(사전식으로 마지막) 디렉토리를 찾는다.
-    예) 20260112_210417_subj16_128
+    NPZ 구조 예시 (필요시 키 이름만 맞춰 수정):
+      - 'eeg'   : (N, C, T)
+      - 'images' 또는 'img' : (N, 3, H, W) 또는 (N, H, W, 3)
+      - 'labels' 또는 'y'   : (N,)
     """
-    if not os.path.isdir(ckpt_root):
-        raise FileNotFoundError(f"Checkpoint root not found: {ckpt_root}")
 
-    sid_tag = f"subj{subject_id:02d}_{img_size}"
-    candidates = [
-        d for d in os.listdir(ckpt_root)
-        if os.path.isdir(os.path.join(ckpt_root, d)) and sid_tag in d
-    ]
-    if not candidates:
-        raise FileNotFoundError(
-            f"No checkpoint directory for subject {subject_id} under {ckpt_root}"
-        )
+    def __init__(self, data_root, subject_id, indices, img_size=128):
+        super().__init__()
+        npz_path = os.path.join(data_root, f"subj{subject_id:02d}.npz")
+        if not os.path.exists(npz_path):
+            raise FileNotFoundError(f"NPZ not found: {npz_path}")
 
-    candidates.sort()
-    latest_dir = os.path.join(ckpt_root, candidates[-1])
-    return latest_dir
+        self.data_root = data_root
+        self.subject_id = subject_id
+        self.img_size = img_size
+
+        npz = np.load(npz_path)
+
+        # ---- 키 이름 유연하게 처리 ----
+        if "eeg" in npz:
+            eeg = npz["eeg"]
+        elif "EEG" in npz:
+            eeg = npz["EEG"]
+        else:
+            raise KeyError(f"'eeg' key not found in {npz_path}")
+
+        if "images" in npz:
+            img = npz["images"]
+        elif "img" in npz:
+            img = npz["img"]
+        else:
+            raise KeyError(f"'images' or 'img' key not found in {npz_path}")
+
+        if "labels" in npz:
+            labels = npz["labels"]
+        elif "y" in npz:
+            labels = npz["y"]
+        else:
+            raise KeyError(f"'labels' or 'y' key not found in {npz_path}")
+
+        # dtype/shape 정리
+        self.eeg = eeg.astype(np.float32)          # (N, C, T)
+        self.img = img.astype(np.float32)          # (N, 3, H, W) or (N, H, W, 3)
+        self.labels = labels.astype(np.int64)      # (N,)
+
+        # 인덱스 선택
+        self.indices = np.array(indices, dtype=np.int64)
+
+        # 이미지 채널 차원 정리 (채널 먼저)
+        # (N, H, W, 3) 이면 (N, 3, H, W)로 바꿈
+        if self.img.ndim == 4 and self.img.shape[-1] in (1, 3) and self.img.shape[1] != 3:
+            # (N, H, W, C) -> (N, C, H, W)
+            self.img = np.transpose(self.img, (0, 3, 1, 2))
+
+        if self.img.shape[1] not in (1, 3):
+            raise ValueError(
+                f"Unexpected image shape: {self.img.shape}. Expected (N,3,H,W) or (N,H,W,3)."
+            )
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        j = self.indices[idx]
+
+        eeg = torch.from_numpy(self.eeg[j])    # (C, T)
+        img = torch.from_numpy(self.img[j])    # (3, H, W) in float
+        label = int(self.labels[j])
+
+        # 여기서는 이미지가 이미 [-1,1]로 저장되었다고 가정
+        # (만약 [0,1] 이나 [0,255] 라면 시각화 시에만 normalize 해도 무방)
+        return eeg, img, label
 
 
-def find_ckpt_path(ckpt_dir: str, subject_id: int) -> str:
-    """
-    우선 best → 없으면 final → 없으면 에러
-    """
-    best = os.path.join(ckpt_dir, f"subj{subject_id:02d}_best.pt")
-    final = os.path.join(ckpt_dir, f"subj{subject_id:02d}_final.pt")
+# ---------------------------------------------------------
+# 2. 체크포인트 디렉토리 탐색 (subjXX_9cls_128 중 최신 폴더)
+# ---------------------------------------------------------
+def find_latest_ckpt_dir(subject_id, ckpt_root="checkpoints_subj128_9cls"):
+    pattern = os.path.join(ckpt_root, f"*subj{subject_id:02d}_9cls_128")
+    cand = glob.glob(pattern)
+    if not cand:
+        raise FileNotFoundError(f"No checkpoint dir matches pattern: {pattern}")
+    cand.sort()
+    return cand[-1]   # 가장 최근(이름/시간 기준 마지막)
 
-    if os.path.isfile(best):
-        return best
-    if os.path.isfile(final):
-        return final
 
-    raise FileNotFoundError(
-        f"Neither best nor final checkpoint found in {ckpt_dir} "
-        f"(expected {os.path.basename(best)} or {os.path.basename(final)})"
+# ---------------------------------------------------------
+# 3. 메인 로직: test split 전체에 대해 이미지 생성
+# ---------------------------------------------------------
+def main(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    sid = args.subject_id
+
+    print("=" * 80)
+    print(f"[Sample-9cls] Subject {sid:02d}, device: {device}")
+    print("=" * 80)
+
+    # 1) 최신 체크포인트 디렉토리/파일 선택
+    ckpt_dir = find_latest_ckpt_dir(sid, ckpt_root=args.ckpt_root)
+    ckpt_path = os.path.join(ckpt_dir, f"subj{sid:02d}_best.pt")
+    if not os.path.exists(ckpt_path):
+        # 만약 best.pt 이름이 다르면 (예: subj16_best.pt) 여기서 수정
+        alt_path = os.path.join(ckpt_dir, "subj16_best.pt")
+        if os.path.exists(alt_path):
+            ckpt_path = alt_path
+        else:
+            raise FileNotFoundError(f"No checkpoint file found in {ckpt_dir}")
+
+    print(f"[Subj {sid:02d}] Loading checkpoint: {ckpt_path}")
+
+    ckpt = torch.load(ckpt_path, map_location=device)
+
+    # 2) 하이퍼파라미터: ckpt에 hparams가 있으면 우선 사용
+    hparams = ckpt.get("hparams", None)
+
+    if hparams is not None:
+        print("[Info] Using hparams from checkpoint.")
+        img_size = hparams.get("img_size", 128)
+        num_timesteps = hparams.get("num_timesteps", 275)
+        base_channels = hparams.get("base_channels", 128)
+        time_dim = hparams.get("time_dim", 256)
+        cond_dim = hparams.get("cond_dim", 256)
+        eeg_hidden_dim = hparams.get("eeg_hidden_dim", 256)
+        cond_scale = hparams.get("cond_scale", 1.5)
+        beta_start = hparams.get("beta_start", 1e-4)
+        beta_end = hparams.get("beta_end", 2e-2)
+    else:
+        print("[Warn] No 'hparams' in checkpoint. Falling back to CLI args.")
+        img_size = args.img_size
+        num_timesteps = args.num_timesteps
+        base_channels = args.base_channels
+        time_dim = 256
+        cond_dim = 256
+        eeg_hidden_dim = 256
+        cond_scale = args.cond_scale
+        beta_start = 1e-4
+        beta_end = 2e-2
+
+    # 3) 모델 생성 및 weight 로딩
+    model = EEGDiffusionModel128(
+        img_size=img_size,
+        img_channels=3,
+        eeg_channels=32,
+        num_classes=9,
+        num_timesteps=num_timesteps,
+        base_channels=base_channels,
+        time_dim=time_dim,
+        cond_dim=cond_dim,
+        eeg_hidden_dim=eeg_hidden_dim,
+        cond_scale=cond_scale,
+        beta_start=beta_start,
+        beta_end=beta_end,
+    ).to(device)
+
+    model.load_state_dict(ckpt["model"])
+    model.eval()
+
+    # 4) test split 인덱스 계산 (train/val/test = 8:1:1, seed 고정)
+    npz_path = os.path.join(args.data_root, f"subj{sid:02d}.npz")
+    npz = np.load(npz_path)
+    if "labels" in npz:
+        N = npz["labels"].shape[0]
+    elif "y" in npz:
+        N = npz["y"].shape[0]
+    else:
+        raise KeyError(f"'labels' or 'y' not found in {npz_path}")
+
+    all_idx = np.arange(N)
+    rng = np.random.RandomState(args.seed)
+    rng.shuffle(all_idx)
+
+    n_train = int(N * args.split_ratio)          # 기본 0.8
+    n_val = int(N * ((1.0 - args.split_ratio) / 2.0))  # 0.1
+    n_test = N - n_train - n_val
+
+    train_idx = all_idx[:n_train]
+    val_idx = all_idx[n_train:n_train + n_val]
+    test_idx = all_idx[n_train + n_val:]
+
+    print(
+        f"[Subj {sid:02d}] total={N}, "
+        f"train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)}"
     )
 
-
-def build_test_loader(
-    data_root: str,
-    subject_id: int,
-    img_size: int,
-    batch_size: int,
-    split_seed: int = 42,
-):
-    """
-    한 subject 전체 trial을 불러와서
-    8:1:1 (train:val:test) 분할을 재현하고,
-    test subset에 대한 DataLoader를 만든다.
-    """
-    dataset = EEGImageDataset(
-        data_root=data_root,
-        subject_id=subject_id,
+    # 5) Dataset/DataLoader (test split만)
+    test_dataset = EEGImageDataset9Class(
+        data_root=args.data_root,
+        subject_id=sid,
+        indices=test_idx,
         img_size=img_size,
     )
-
-    n_total = len(dataset)
-    indices = np.arange(n_total)
-
-    rng = np.random.RandomState(split_seed)
-    rng.shuffle(indices)
-
-    n_train = int(n_total * 0.8)
-    n_val = int(n_total * 0.1)
-    n_test = n_total - n_train - n_val
-
-    train_idx = indices[:n_train]
-    val_idx = indices[n_train:n_train + n_val]
-    test_idx = indices[n_train + n_val:]
-
-    print(f"[Subj {subject_id:02d}] total={n_total}, train={len(train_idx)}, "
-          f"val={len(val_idx)}, test={len(test_idx)}")
-
-    test_subset = torch.utils.data.Subset(dataset, test_idx)
     test_loader = DataLoader(
-        test_subset,
-        batch_size=batch_size,
+        test_dataset,
+        batch_size=args.batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=0,
         pin_memory=True,
     )
 
-    return test_loader, test_idx, dataset
+    # 6) 출력 디렉토리
+    out_root = os.path.join(args.sample_root, os.path.basename(ckpt_dir))
+    os.makedirs(out_root, exist_ok=True)
+    print(f"[Subj {sid:02d}] Samples will be saved to: {out_root}")
+
+    # 7) test 전체에 대해 EEG-conditioned diffusion 샘플 생성
+    model.eval()
+    torch.set_grad_enabled(False)
+
+    global_idx = 0
+    for batch_idx, (eeg, img_gt, labels) in enumerate(test_loader):
+        eeg = eeg.to(device)
+        labels = labels.to(device)
+
+        # diffusion sampling
+        x_gen = model.sample(
+            eeg=eeg,
+            labels=labels,
+            num_steps=args.sample_steps,
+        )  # (B,3,H,W), [-1,1]
+
+        # 시각화를 위해 [0,1] 범위로 변환
+        x_gen_vis = (x_gen.clamp(-1.0, 1.0) + 1.0) / 2.0
+        img_gt_vis = (img_gt.clamp(-1.0, 1.0) + 1.0) / 2.0
+
+        B = eeg.size(0)
+        for b in range(B):
+            trial_id = global_idx
+            label = int(labels[b].item())
+
+            gen_path = os.path.join(
+                out_root,
+                f"subj{sid:02d}_trial{trial_id:03d}_label{label}_GEN.png",
+            )
+            gt_path = os.path.join(
+                out_root,
+                f"subj{sid:02d}_trial{trial_id:03d}_label{label}_GT.png",
+            )
+
+            save_image(x_gen_vis[b], gen_path)
+            save_image(img_gt_vis[b], gt_path)
+
+            global_idx += 1
+
+        print(
+            f"[Subj {sid:02d}] Batch {batch_idx+1}/{len(test_loader)} "
+            f"→ saved {B} pairs (GEN/GT)"
+        )
+
+    print(f"[Subj {sid:02d}] Done. Total saved trials: {global_idx}")
 
 
-def main():
+# ---------------------------------------------------------
+# 4. CLI
+# ---------------------------------------------------------
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Sample all test trials (128x128, 9-class diffusion)"
+        description="EEG-conditioned diffusion sampling (9-class, 128x128)"
     )
-
-    parser.add_argument("--data_root", type=str, default="./preproc_data",
-                        help="Root dir containing subj_XX.mat and images/")
-    parser.add_argument("--subject_id", type=int, required=True,
-                        help="Subject ID (e.g., 1, 2, 3, ...)")
-    parser.add_argument("--img_size", type=int, default=128,
-                        help="Image resolution (must match training)")
-    parser.add_argument("--batch_size", type=int, default=8,
-                        help="Batch size for sampling")
-
-    # UNet / diffusion 구조
-    parser.add_argument("--base_channels", type=int, default=96,
-                        help="Base channels of UNet (64, 96, 128, ...)")
-    parser.add_argument("--ch_mult", type=str, default="1,2,2,4",
-                        help="Channel multipliers per UNet level, e.g. '1,2,2,4'")
-    parser.add_argument("--n_res_blocks", type=int, default=2,
-                        help="Number of ResBlocks per UNet level")
-    parser.add_argument("--num_timesteps", type=int, default=400,
-                        help="Total diffusion timesteps used during training")
-
-    # sampling 세부 설정
-    parser.add_argument("--sample_steps", type=int, default=0,
-                        help="Number of steps to use at sampling "
-                             "(0 → use num_timesteps)")
-    parser.add_argument("--guidance_scale", type=float, default=2.5,
-                        help="Classifier-free guidance scale at sampling")
-
-    # split 시드 (train과 맞추기)
-    parser.add_argument("--split_seed", type=int, default=42,
-                        help="Seed for train/val/test split (must match training)")
-
-    # checkpoint 경로
-    parser.add_argument("--ckpt_root", type=str, default="./checkpoints_subj128_9class",
-                        help="Root directory for 9-class checkpoints")
-    parser.add_argument("--ckpt_dir", type=str, default="",
-                        help="If set, use this checkpoint directory directly")
-    # 출력 위치
-    parser.add_argument("--out_root", type=str, default="./samples_subj128_9class",
-                        help="Root directory to save generated samples")
+    parser.add_argument(
+        "--data_root",
+        type=str,
+        default="./preproc_data",
+        help="Root directory of subjXX.npz",
+    )
+    parser.add_argument(
+        "--ckpt_root",
+        type=str,
+        default="./checkpoints_subj128_9cls",
+        help="Root directory of 9-class checkpoints",
+    )
+    parser.add_argument(
+        "--sample_root",
+        type=str,
+        default="./samples_subj128_9cls",
+        help="Output directory for generated samples",
+    )
+    parser.add_argument(
+        "--subject_id",
+        type=int,
+        required=True,
+        help="Subject ID (e.g., 16)",
+    )
+    parser.add_argument(
+        "--img_size",
+        type=int,
+        default=128,
+        help="Image size (should match training)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Batch size for sampling",
+    )
+    parser.add_argument(
+        "--num_timesteps",
+        type=int,
+        default=275,
+        help="Total diffusion steps (only used if hparams not in checkpoint)",
+    )
+    parser.add_argument(
+        "--base_channels",
+        type=int,
+        default=128,
+        help="Base channels of UNet (only used if hparams not in checkpoint)",
+    )
+    parser.add_argument(
+        "--cond_scale",
+        type=float,
+        default=1.5,
+        help="Condition embedding scale (only used if hparams not in checkpoint)",
+    )
+    parser.add_argument(
+        "--sample_steps",
+        type=int,
+        default=0,
+        help=(
+            "Number of sampling steps. 0 or None → use full num_timesteps from model."
+        ),
+    )
+    parser.add_argument(
+        "--split_ratio",
+        type=float,
+        default=0.8,
+        help="Train ratio for train/val/test split (train=ratio, val=test=(1-ratio)/2)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for splitting train/val/test",
+    )
 
     args = parser.parse_args()
-
-    sid = args.subject_id
-
-    # ----------------- device -----------------
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("=" * 80)
-    print(f"[Sample-9class] Subject {sid:02d}, device: {device}")
-    print("=" * 80)
-
-    # ----------------- 데이터 & test split -----------------
-    test_loader, test_idx, dataset = build_test_loader(
-        data_root=args.data_root,
-        subject_id=sid,
-        img_size=args.img_size,
-        batch_size=args.batch_size,
-        split_seed=args.split_seed,
-    )
-    print(f"[Subj {sid:02d}] number of test trials: {len(test_idx)}")
-
-    # ----------------- 모델 구성 -----------------
-    # 샘플 하나 꺼내서 EEG 채널 수 확인
-    sample_eeg, sample_img, sample_label = dataset[0]
-    eeg_channels = sample_eeg.shape[0]
-    print(f"[Subj {sid:02d}] EEG channels: {eeg_channels}, img size: {sample_img.shape[-2:]}")
-
-    ch_mult = tuple(int(x) for x in args.ch_mult.split(","))
-
-    model = EEGDiffusionModel128(
-        img_size=args.img_size,
-        img_channels=3,
-        eeg_channels=eeg_channels,
-        num_classes=9,
-        num_timesteps=args.num_timesteps,
-        base_channels=args.base_channels,
-        ch_mult=ch_mult,
-        n_res_blocks=args.n_res_blocks,
-    ).to(device)
-    model.eval()
-
-    # ----------------- checkpoint 로드 -----------------
-    if args.ckpt_dir:
-        ckpt_dir = args.ckpt_dir
-    else:
-        ckpt_dir = find_latest_ckpt_dir(args.ckpt_root, sid, args.img_size)
-
-    ckpt_path = find_ckpt_path(ckpt_dir, sid)
-    print(f"Loading checkpoint: {ckpt_path}")
-
-    ckpt = torch.load(ckpt_path, map_location=device)
-    # 학습 스크립트에서 torch.save({"model": model.state_dict(), ...})로 저장했다면:
-    if isinstance(ckpt, dict) and "model" in ckpt:
-        state_dict = ckpt["model"]
-    else:
-        # 혹시 그냥 state_dict만 저장한 경우도 대비
-        state_dict = ckpt
-
-    model.load_state_dict(state_dict, strict=True)
-
-    # ----------------- 출력 디렉터리 -----------------
-    exp_name = os.path.basename(os.path.normpath(ckpt_dir))
-    out_dir = os.path.join(args.out_root, exp_name)
-    os.makedirs(out_dir, exist_ok=True)
-    print(f"Samples will be saved under: {out_dir}")
-
-    # ----------------- 샘플링 루프 -----------------
-    model.to(device)
-    model.eval()
-
-    # sample_steps 결정
-    if args.sample_steps is None or args.sample_steps <= 0:
-        sample_steps = None  # 모델 내부에서 num_timesteps 사용
-    else:
-        sample_steps = args.sample_steps
-
-    global_trial_counter = 0
-    with torch.no_grad():
-        for batch_idx, (eeg, img_gt, labels) in enumerate(test_loader):
-            eeg = eeg.to(device)
-            img_gt = img_gt.to(device)
-            labels = labels.to(device)
-
-            # diffusion sampling
-            x_gen = model.sample(
-                eeg=eeg,
-                labels=labels,
-                num_steps=sample_steps,
-                guidance_scale=args.guidance_scale,
-            )  # (B,3,H,W), [-1,1]
-
-            # 시각화를 위해 [0,1]로 스케일링
-            x_gen_vis = (x_gen.clamp(-1.0, 1.0) + 1.0) / 2.0
-            img_gt_vis = (img_gt.clamp(-1.0, 1.0) + 1.0) / 2.0
-
-            bsz = x_gen.size(0)
-            for b in range(bsz):
-                trial_global_idx = test_idx[global_trial_counter]
-                label_int = int(labels[b].item())
-
-                gen_name = (
-                    f"subj{sid:02d}_trial{trial_global_idx:03d}_label{label_int}_gen.png"
-                )
-                gt_name = (
-                    f"subj{sid:02d}_trial{trial_global_idx:03d}_label{label_int}_GT.png"
-                )
-
-                gen_path = os.path.join(out_dir, gen_name)
-                gt_path = os.path.join(out_dir, gt_name)
-
-                vutils.save_image(x_gen_vis[b], gen_path)
-                vutils.save_image(img_gt_vis[b], gt_path)
-
-                global_trial_counter += 1
-
-            print(f"[Subj {sid:02d}] batch {batch_idx+1}/{len(test_loader)} "
-                  f"→ saved {bsz} pairs")
-
-    print(f"[Subj {sid:02d}] Done. Total saved test trials: {global_trial_counter}")
-
-
-if __name__ == "__main__":
-    main()
+    main(args)
