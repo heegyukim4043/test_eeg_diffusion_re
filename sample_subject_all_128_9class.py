@@ -24,7 +24,7 @@ class EEGImageDataset9Class(Dataset):
 
     def __init__(self, data_root, subject_id, indices, img_size=128):
         super().__init__()
-        npz_path = os.path.join(data_root, f"subj{subject_id:02d}.npz")
+        npz_path = os.path.join(data_root, f"subj{subject_id:02d}.mat")
         if not os.path.exists(npz_path):
             raise FileNotFoundError(f"NPZ not found: {npz_path}")
 
@@ -351,3 +351,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
+
