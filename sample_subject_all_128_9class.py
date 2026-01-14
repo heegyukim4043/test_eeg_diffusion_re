@@ -27,8 +27,8 @@ class EEGImageDataset9Class(Dataset):
     def __init__(self, data_root, subject_id, indices, img_size=128):
         super().__init__()
         # 우선 NPZ -> 없으면 MAT 순으로 찾기
-        npz_path = os.path.join(data_root, f"subj{subject_id:02d}.npz")
-        mat_path = os.path.join(data_root, f"subj{subject_id:02d}.mat")
+        npz_path = os.path.join(data_root, f"subj_{subject_id:02d}.npz")
+        mat_path = os.path.join(data_root, f"subj_{subject_id:02d}.mat")
 
         if os.path.exists(npz_path):
             self._load_npz(npz_path)
@@ -36,7 +36,7 @@ class EEGImageDataset9Class(Dataset):
             self._load_mat(mat_path)
         else:
             raise FileNotFoundError(
-                f"No subj{subject_id:02d}.npz or subj{subject_id:02d}.mat in {data_root}"
+                f"No subj{subject_id:02d}.npz or subj_{subject_id:02d}.mat in {data_root}"
             )
 
         self.data_root = data_root
@@ -229,8 +229,8 @@ def main(args):
 
     # 4) test split 인덱스 계산 (train/val/test = 8:1:1, seed 고정)
     #    여기서도 NPZ -> 없으면 MAT 순으로 처리
-    npz_path = os.path.join(args.data_root, f"subj{sid:02d}.npz")
-    mat_path = os.path.join(args.data_root, f"subj{sid:02d}.mat")
+    npz_path = os.path.join(args.data_root, f"subj_{sid:02d}.npz")
+    mat_path = os.path.join(args.data_root, f"subj_{sid:02d}.mat")
 
     if os.path.exists(npz_path):
         npz = np.load(npz_path)
@@ -426,3 +426,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
+
