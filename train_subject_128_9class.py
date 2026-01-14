@@ -149,6 +149,7 @@ def train_one_subject_9cls(args, subject_id: int):
         num_timesteps=args.num_timesteps,
         base_channels=args.base_channels,
         ch_mult=ch_mult,
+        n_res_blocks=args.n_res_blocks,
     ).to(device)
 
     # lambda_rec, cond_scale 를 __init__ 밖에서라도 강제 세팅 (안전)
@@ -339,8 +340,9 @@ def main():
 
     parser.add_argument("--ckpt_root", type=str, default="./checkpoints_subj128_9cls",
                         help="Base directory for saving checkpoints/logs")
+    
     parser.add_argument("--n_res_blocks", type=int, default=2,
-                        help="UNet 각 stage당 ResBlock 개수")
+                    help="number of ResNet blocks per UNet level")
     
 
     args = parser.parse_args()
@@ -354,4 +356,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
