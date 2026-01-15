@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
 
-from model_128 import EEGDiffusionModel128
+from model_128_eegonly import EEGDiffusionModel128
 
 
 # ---------------------------------------------------------
@@ -333,12 +333,11 @@ def main(args):
             labels = label_local  # 로컬 라벨(0~2)을 그대로 사용
 
             # diffusion sampling
-            x_gen = model.sample(
+            x_gen = model.sample_eeg_only(
                 eeg=eeg,
-                labels=labels,
                 #num_steps=args.sample_steps,
-                guidance_scale=args.guidance_scale,
                 num_steps=args.sample_steps,
+                guidance_scale=args.guidance_scale,
             )  # (B,3,H,W), [-1,1]
 
             x_gen_denorm = denorm_img(x_gen)
@@ -405,7 +404,7 @@ if __name__ == "__main__":
                         help="특정 ckpt 디렉토리를 직접 지정하고 싶을 때 사용")
 
     parser.add_argument("--samples_root", type=str,
-                        default="./samples_subj128_group")
+                        default="./samples_subj128_group_eegonly")
 
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=4)
