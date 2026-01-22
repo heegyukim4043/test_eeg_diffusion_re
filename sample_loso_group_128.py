@@ -22,6 +22,8 @@ class EEGImageGroupAllDataset(Dataset):
         mask_group = (y >= cls_low) & (y <= cls_high)
         indices = np.where(mask_group)[0]
 
+        self.cls_low = cls_low
+        self.cls_high = cls_high
         self.eeg = torch.from_numpy(X).float().permute(2, 0, 1)[indices]
         self.labels = y[indices]
         self.indices = indices
