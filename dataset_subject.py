@@ -25,6 +25,7 @@ class EEGImageSubjectDataset(Dataset):
         split_ratio: float = 0.7,  # 7:3 비율
         img_size: int = 64,
         seed: int = 42,
+        mat_path: str | None = None,  # 데이터 파일 경로를 직접 지정하고 싶을 때 사용
     ):
         assert split in ["train", "test"]
         self.data_root = Path(data_root)
@@ -33,8 +34,24 @@ class EEGImageSubjectDataset(Dataset):
         self.split_ratio = split_ratio
 
         # ---------- MAT 파일 로드 ----------
-        mat_path = self.data_root / f"subj_{subject_id:02d}.mat"
-        mat = loadmat(mat_path)
+        default_mat_path = self.data_root / f"subj_{subject_id:02d}.mat"
+        chosen_mat_path = Path(mat_path) if mat_path is not None else default_mat_path
+
+        if not chosen_mat_path.exists():
+            sample_mat = self.data_root / "sample.mat"
+            if sample_mat.exists():
+                print(
+                    f"[EEGImageSubjectDataset] '{chosen_mat_path.name}'를 찾지 못해 "
+                    f"샘플 데이터('{sample_mat.name}')를 대신 사용합니다."
+                )
+                chosen_mat_path = sample_mat
+            else:
+                raise FileNotFoundError(
+                    f"EEG 데이터 파일을 찾을 수 없습니다: {chosen_mat_path}. "
+                    "실제 데이터(subj_XX.mat) 또는 sample.mat 중 하나가 필요합니다."
+                )
+
+        mat = loadmat(chosen_mat_path)
 
         X = mat["X"].astype("float32")         # (32, 512, 540) = ch x time x trial
         y = mat["y"].squeeze().astype("int64") # (540,) = label 1~9
